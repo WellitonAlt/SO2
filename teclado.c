@@ -15,7 +15,6 @@ MODULE_LICENSE("GPL");
 
 #define ALL_LEDS_ON   0x07
 #define RESTORE_LEDS  0xFF
-#define MAX_DEV 1
 
 static int ledBlink_open(struct inode *inode, struct file *file);
 static int ledBlink_release(struct inode *inode, struct file *file);
@@ -30,12 +29,11 @@ static const struct file_operations ledBlink_fops = {
 
 static int dev_major = 0;
 static struct class *ledBlink_class = NULL;
-static struct ledBlink_device_data ledBlink_data[MAX_DEV];
 
+struct ledBlink_device_data ledBlink_data;
 struct ledBlink_device_data {
    struct cdev cdev;
 };
-
 struct timer_list my_timer;
 struct tty_driver *my_driver;
 
@@ -57,12 +55,12 @@ static ssize_t ledBlink_write(struct file *file, const char __user *buf, size_t 
 	    if (kstrtol(databuf, 10, &period) > 0 ) return -EINVAL;
 	    if (period >= 0 && period < 10)  return -EINVAL;
         if (period < 0) {
-        	printk("Disable Led Blink");
-	        isBlinking = 0;
-	        return count;
+            printk("Disable Led Blink");
+	    isBlinking = 0;
+	    return count;
         }
 
-	    blinkDelay = period;
+	blinkDelay = period;
         printk("Period: %d\n", blinkDelay);
         isBlinking = 1;
     } else {
@@ -103,38 +101,31 @@ static void my_timer_func(struct timer_list *timer) {
 }
 
 static int __init led_init(void) {
-    int err, i;
+    int err; 
     dev_t dev;
 
     printk(KERN_INFO "Led Blink ON.....\n");
 
-    Err = alloc_chrdev_region(&dev, 0, MAX_DEV, "ledBlink");
+    err = alloc_chrdev_region(&dev, 0, 1, "ledBlink");
     dev_major = MAJOR(dev);
     ledBlink_class = class_create(THIS_MODULE, "ledBlink");
 
-    for (i = 0; i < MAX_DEV; i++) {
-        cdev_init(&ledBlink_data[i].cdev, &ledBlink_fops);
-        ledBlink_data[i].cdev.owner = THIS_MODULE;
-        cdev_add(&ledBlink_data[i].cdev, MKDEV(dev_major, i), 1);
-        device_create(ledBlink_class, NULL, MKDEV(dev_major, i), NULL, "ledBlink-%d", i);
-    }
+    cdev_init(&ledBlink_data.cdev, &ledBlink_fops);
+    ledBlink_data.cdev.owner = THIS_MODULE;
+    cdev_add(&ledBlink_data.cdev, MKDEV(dev_major, 0), 1);
+    device_create(ledBlink_class, NULL, MKDEV(dev_major, 0), NULL, "ledBlink-0");
 
-	my_driver = vc_cons[fg_console].d->port.tty->driver;
+    my_driver = vc_cons[fg_console].d->port.tty->driver;
+    timer_setup(&my_timer, my_timer_func, 0);
+    mod_timer(&my_timer, jiffies + msecs_to_jiffies(blinkDelay));
 
-	timer_setup(&my_timer, my_timer_func, 0);
-	mod_timer(&my_timer, jiffies + msecs_to_jiffies(blinkDelay));
-
-	return 0;
+    return 0;
 }
 
 static void __exit led_cleanup(void) {
-    int i;
-
     printk(KERN_INFO "Led Blink OFF...\n");
 
-    for (i = 0; i < MAX_DEV; i++) {
-        device_destroy(ledBlink_class, MKDEV(dev_major, i));
-    }
+    device_destroy(ledBlink_class, MKDEV(dev_major, 0));
 
     class_unregister(ledBlink_class);
     class_destroy(ledBlink_class);

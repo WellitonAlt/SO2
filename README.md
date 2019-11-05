@@ -6,7 +6,7 @@ make
 sudo insmod teclado.ko
 
 
-Para testar \n
+Para testar /n
 echo "500" > /dev/ledBlink-0 \n
   -> "500" frequencia \n \n
 

@@ -1,20 +1,16 @@
-#include <linux/module.h>
-#include <linux/configfs.h>
+#include <asm/io.h>
 #include <linux/cdev.h>
+#include <linux/configfs.h>
 #include <linux/device.h>
-#include <linux/uaccess.h>
 #include <linux/fs.h>
+#include <linux/gpio.h>
 #include <linux/init.h>
-#include <linux/tty.h>
-#include <linux/kd.h>
-#include <linux/vt.h>
-#include <linux/console_struct.h>
-#include <linux/vt_kern.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/timer.h>
+#include <linux/uaccess.h>
 
 MODULE_LICENSE("GPL");
-
-#define ALL_LEDS_ON   0x07
-#define RESTORE_LEDS  0xFF
 
 static int ledBlink_open(struct inode *inode, struct file *file);
 static int ledBlink_release(struct inode *inode, struct file *file);
@@ -34,12 +30,13 @@ struct ledBlink_device_data ledBlink_data;
 struct ledBlink_device_data {
    struct cdev cdev;
 };
-struct timer_list my_timer;
-struct tty_driver *my_driver;
 
-int blinkDelay = 1000;
-int isBlinking = 0;
-int on = 0;
+static unsigned int gpioLED = 17;       
+static bool ledOn = 0;
+static bool isBlinking = 0;
+static unsigned int blinkDelay = 1000;
+
+struct timer_list my_timer;
 
 static ssize_t ledBlink_write(struct file *file, const char __user *buf, size_t count, loff_t *offset) {
     size_t maxdatalen = 30, ncopied;
@@ -53,50 +50,52 @@ static ssize_t ledBlink_write(struct file *file, const char __user *buf, size_t 
     if (ncopied == 0) {
         databuf[maxdatalen] = 0;
 	    if (kstrtol(databuf, 10, &period) > 0 ) return -EINVAL;
-	    if (period >= 0 && period < 10)  return -EINVAL;
+	    
+        
+        if (period >= 0 && period < 10) {
+            printk(KERN_INFO "LedBlink - ON \n");
+            ledOn = 1;
+            isBlinking = 0;
+            return count;
+        }
+        
+        
         if (period < 0) {
-            printk("Disable Led Blink");
-	    isBlinking = 0;
-	    return count;
+            printk(KERN_INFO "LedBlink - O \n");
+            ledOn = 0;
+	        isBlinking = 0;
+	        return count;
         }
 
-	blinkDelay = period;
-        printk("Period: %d\n", blinkDelay);
+	    blinkDelay = period;
+        printk(KERN_INFO "LedBlink - Period: %d\n", blinkDelay);
         isBlinking = 1;
-    } else {
-        printk("Period Erro: \n");
-        isBlinking = 0;
+
+        return count;
     }
+
+    printk(KERN_INFO "LedBlink - erro no argumento \n");
+    isBlinking = 0; 
 
     return count;
 }
 
 static int ledBlink_open(struct inode *inode, struct file *file) {
-    printk("Led Blink: Device open\n");
+    printk(KERN_INFO "LedBlink - Device open \n");
     return 0;
 }
 
 static int ledBlink_release(struct inode *inode, struct file *file) {
-    printk("Led Blink: Device close\n");
+    printk(KERN_INFO "LedBlink -  Device close \n");
     return 0;
 }
 
 static void my_timer_func(struct timer_list *timer) {
-    int pstatus;
-
     if (isBlinking == 1) {
-    	if (on == 1) {
-	       pstatus = RESTORE_LEDS;
-	       on = 0;
-	    } else {
-	       pstatus = ALL_LEDS_ON;
-	       on = 1;
-	    }
-    } else {
-        pstatus = RESTORE_LEDS;
+        ledOn = ledOn ? 0 : 1;
     }
 
-    (my_driver->ops->ioctl) (vc_cons[fg_console].d->port.tty, KDSETLED, pstatus);
+    gpio_set_value(gpioLED, ledOn);
     mod_timer(&my_timer, jiffies + msecs_to_jiffies(blinkDelay));
 }
 
@@ -104,7 +103,12 @@ static int __init led_init(void) {
     int err; 
     dev_t dev;
 
-    printk(KERN_INFO "Led Blink ON.....\n");
+    printk(KERN_INFO "LedBlink - ON.....\n");
+
+    if (!gpio_is_valid(gpioLED)){
+      printk(KERN_INFO "LedBlink - GPIO_TEST: invalid LED GPIO\n");
+      return -ENODEV;
+    }
 
     err = alloc_chrdev_region(&dev, 0, 1, "ledBlink");
     dev_major = MAJOR(dev);
@@ -115,7 +119,10 @@ static int __init led_init(void) {
     cdev_add(&ledBlink_data.cdev, MKDEV(dev_major, 0), 1);
     device_create(ledBlink_class, NULL, MKDEV(dev_major, 0), NULL, "ledBlink-0");
 
-    my_driver = vc_cons[fg_console].d->port.tty->driver;
+    gpio_request(gpioLED, "sysfs");
+    gpio_direction_output(gpioLED, ledOn);
+    gpio_export(gpioLED, false);   
+
     timer_setup(&my_timer, my_timer_func, 0);
     mod_timer(&my_timer, jiffies + msecs_to_jiffies(blinkDelay));
 
@@ -123,20 +130,21 @@ static int __init led_init(void) {
 }
 
 static void __exit led_cleanup(void) {
-    printk(KERN_INFO "Led Blink OFF...\n");
+    printk(KERN_INFO "LedBlink - OFF...\n");
 
     device_destroy(ledBlink_class, MKDEV(dev_major, 0));
 
     class_unregister(ledBlink_class);
     class_destroy(ledBlink_class);
-
     unregister_chrdev_region(MKDEV(dev_major, 0), MINORMASK);
 
-    (my_driver->ops->ioctl) (vc_cons[fg_console].d->port.tty, KDSETLED, RESTORE_LEDS);
+    gpio_set_value(gpioLED, 0);
+    gpio_unexport(gpioLED); 
+    gpio_free(gpioLED);
+
     del_timer(&my_timer);
 }
 
 module_init(led_init);
 module_exit(led_cleanup);
-
 
